@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Ghép bài",
-  "version": "2.0",
+  "version": "2.9",
   "description": "Tick phần bài giảng trên LMS rồi mở thành nhiều cửa sổ.",
-  "permissions": ["windows", "storage"],
+  "permissions": ["windows", "storage", "scripting", "tabs"],
   "host_permissions": ["https://lms.vnu.edu.vn/*", "https://vnu.dttt.vn/*"],
   "background": {
     "service_worker": "background.js"

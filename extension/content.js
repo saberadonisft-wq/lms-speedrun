@@ -26,52 +26,134 @@
     return document.querySelectorAll(".__lesson-name a, .__lesson-name-child a, a.acursor");
   }
 
+  function itemPath(anchor) {
+    var path = [];
+    var node = anchor;
+    while (node && node !== document.body) {
+      if (node.tagName === "A") {
+        var title = itemTitle(node);
+        if (title && path[0] !== title) path.unshift(title);
+      }
+      node = node.parentElement;
+    }
+    return path.length ? path : [itemTitle(anchor)];
+  }
+
   function collect() {
     var nodes = lessonNodes();
     var items = [];
     var seen = {};
     for (var i = 0; i < nodes.length; i++) {
-      if (nodes[i].closest("#ghep-bai-panel, #ghep-bai-launch")) continue;
+      if (nodes[i].closest("#ghep-bai-panel, #ghep-bai-launch, #ghep-bai-close")) continue;
       var title = itemTitle(nodes[i]);
       if (title.length < 2) continue;
-      var key = itemDepth(nodes[i]) + "|" + title;
+      var path = itemPath(nodes[i]);
+      var key = path.join(">");
       if (seen[key]) continue;
       seen[key] = true;
-      items.push({ title: title.slice(0, 180), depth: itemDepth(nodes[i]) });
+      items.push({ title: title.slice(0, 180), depth: itemDepth(nodes[i]), path: path });
     }
     return items;
   }
 
-  function flattenTree(nodes, depth, classId, out) {
+  function idOf(value) {
+    if (value == null) return "";
+    if (typeof value === "string" || typeof value === "number") return String(value);
+    if (value.value) return idOf(value.value);
+    try {
+      var text = value.toString();
+      if (text && text !== "[object Object]") return text;
+    } catch (e) { /* bỏ qua */ }
+    return "";
+  }
+
+  function pageTree() {
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(rows) {
+        if (done) return;
+        done = true;
+        document.removeEventListener("ghep-tree", onTree);
+        resolve(Array.isArray(rows) ? rows : []);
+      }
+      function onTree(event) {
+        finish(event.detail || []);
+      }
+      document.addEventListener("ghep-tree", onTree);
+      document.dispatchEvent(new CustomEvent("ghep-need-tree"));
+      setTimeout(function () { finish([]); }, 800);
+    });
+  }
+
+  function rowsToItems(rows, classId) {
+    return (rows || []).map(function (row) {
+      var path = row.path && row.path.length ? row.path : [row.title];
+      return {
+        title: row.title,
+        depth: row.depth || 0,
+        path: path,
+        url: location.origin + "/learn/lop-hoc/chi-tiet/" + classId + "/" + row.id + "?ghepPath=" + encodeURIComponent(JSON.stringify(path))
+      };
+    });
+  }
+
+  function flattenTree(nodes, depth, classId, out, ancestors) {
+    ancestors = ancestors || [];
     (nodes || []).forEach(function (node) {
       if (!node) return;
       var title = plain(node.title || node.name || "");
-      var id = node.id ? String(node.id) : "";
+      var id = idOf(node.id);
+      var path = title ? ancestors.concat([title]) : ancestors.slice();
       if (title && id && id !== "00000000-0000-0000-0000-000000000000") {
         out.push({
           title: title.slice(0, 180),
           depth: depth,
-          url: location.origin + "/learn/lop-hoc/chi-tiet/" + classId + "/" + id + "#ghepId=" + id + "&ghep=" + encodeURIComponent(title)
+          path: path,
+          url: location.origin + "/learn/lop-hoc/chi-tiet/" + classId + "/" + id + "?ghepPath=" + encodeURIComponent(JSON.stringify(path))
         });
       }
-      flattenTree(node.childrens || node.children || [], depth + 1, classId, out);
+      flattenTree(node.childrens || node.children || [], depth + 1, classId, out, path);
     });
   }
 
   function loadOutline() {
     var match = location.pathname.match(/\/lop-hoc\/chi-tiet\/([0-9a-f-]{36})/i);
-    var token = "";
-    try { token = sessionStorage.getItem("access_token") || localStorage.getItem("access_token") || ""; } catch (e) { token = ""; }
-    if (!match || !token) return Promise.resolve({ items: collect(), note: "Không thấy phiên đăng nhập để lấy mã bài." });
-    return ask({ type: "tree", classId: match[1], token: token }).then(function (response) {
+  function findToken() {
+    var stores = [sessionStorage, localStorage];
+    var preferred = ["access_token", "token", "auth_token"];
+    for (var s = 0; s < stores.length; s++) {
+      for (var p = 0; p < preferred.length; p++) {
+        var direct = stores[s].getItem(preferred[p]);
+        if (direct && direct.length > 20) return direct.replace(/^Bearer\s+/i, "");
+      }
+      for (var i = 0; i < stores[s].length; i++) {
+        var key = stores[s].key(i) || "";
+        if (!/token/i.test(key) || /refresh|id_token/i.test(key)) continue;
+        var value = stores[s].getItem(key) || "";
+        if (value.length > 20 && value.length < 8000) return value.replace(/^Bearer\s+/i, "");
+      }
+    }
+    return "";
+  }
+    if (!match) return Promise.resolve({ items: collect(), note: "Hãy mở trang lớp học." });
+    return pageTree().then(function (rows) {
+      var fromPage = rowsToItems(rows, match[1]);
+      if (fromPage.length) {
+        var pagePaths = {};
+        fromPage.forEach(function (item) { pagePaths[item.url.split("?")[0].split("#")[0]] = true; });
+        return { items: fromPage, note: fromPage.length + " mục, " + Object.keys(pagePaths).length + " địa chỉ khác nhau." };
+      }
+      if (!findToken()) return { items: collect(), note: "Chưa đọc được mã bài. Hãy tải lại trang lớp, rồi bấm Ghép bài." };
+      return ask({ type: "tree", classId: match[1], token: findToken() }).then(function (response) {
       var items = [];
       var nodes = response && response.nodes;
       if (nodes && !Array.isArray(nodes) && (nodes.childrens || nodes.children)) nodes = [nodes];
       if (nodes) flattenTree(nodes, 0, match[1], items);
       if (!items.length) return { items: collect(), note: response && response.error ? response.error : "Không đọc được mã từng bài." };
       var paths = {};
-      items.forEach(function (item) { paths[item.url.split("#")[0]] = true; });
+      items.forEach(function (item) { paths[item.url.split("?")[0].split("#")[0]] = true; });
       return { items: items, note: items.length + " mục, " + Object.keys(paths).length + " địa chỉ khác nhau." };
+      });
     });
   }
 
@@ -80,44 +162,6 @@
     var base = match ? location.origin + "/learn/lop-hoc/chi-tiet/" + match[1] : location.href.split("#")[0];
     return base + "#ghep=" + encodeURIComponent(title);
   }
-
-  function sameTitle(a, b) {
-    a = plain(a).toLowerCase();
-    b = plain(b).toLowerCase();
-    if (!a || !b) return false;
-    if (a === b) return true;
-    return a.length > 12 && b.indexOf(a) !== -1 || b.length > 12 && a.indexOf(b) !== -1;
-  }
-
-  function openSavedLesson() {
-    var found = location.hash.match(/[#&]ghep=([^&]+)/);
-    if (!found) return;
-    var title = found[1];
-    try { title = decodeURIComponent(title); } catch (e) { /* giữ nguyên */ }
-    var attempts = 0;
-    var timer = setInterval(function () {
-      attempts += 1;
-      var nodes = lessonNodes();
-      if (!nodes.length || attempts < 4) {
-        if (attempts > 40) clearInterval(timer);
-        return;
-      }
-      var exact = null;
-      var loose = null;
-      for (var i = 0; i < nodes.length; i++) {
-        var current = itemTitle(nodes[i]);
-        if (plain(current).toLowerCase() === plain(title).toLowerCase()) exact = nodes[i];
-        else if (!loose && sameTitle(current, title)) loose = nodes[i];
-      }
-      var target = exact || loose;
-      if (target) {
-        target.click();
-        clearInterval(timer);
-      } else if (attempts > 40) clearInterval(timer);
-    }, 500);
-  }
-
-  openSavedLesson();
 
   function ask(message) {
     return new Promise(function (resolve) {
@@ -251,7 +295,7 @@
 
     function renderParts(parts) {
       list.textContent = "";
-      title.textContent = parts.length ? parts.length + " mục, mỗi mục một địa chỉ" : "Không thấy mục bài";
+      title.textContent = parts.length ? parts.length + " mục" : "Không thấy mục bài";
       parts.forEach(function (part) {
         var row = document.createElement("label");
         css(row, {
@@ -265,7 +309,12 @@
         box.type = "checkbox";
         box.checked = false;
         box.dataset.title = part.title;
-        box.dataset.url = part.url || "";
+        var path = part.path && part.path.length ? part.path : [part.title];
+        var url = part.url || lessonUrl(part.title);
+        if (url.indexOf("ghepPath=") === -1) {
+          url += (url.indexOf("#") === -1 ? "#" : "&") + "ghepPath=" + encodeURIComponent(JSON.stringify(path));
+        }
+        box.dataset.url = url;
         css(box, { "margin-top": "2px", flex: "none" });
         var span = document.createElement("span");
         span.textContent = part.title;
@@ -312,6 +361,11 @@
       : "Hãy mở mục bài giảng cho các video hiện ra, rồi bấm Ghép bài lần nữa.";
     css(msg, { margin: "8px 0 0", color: "#4f4942" });
 
+    function contentKey(url) {
+      var match = String(url).match(/\/chi-tiet\/[0-9a-f-]{36}\/([0-9a-f-]{36})/i);
+      return match ? match[1].toLowerCase() : "";
+    }
+
     go.addEventListener("click", function () {
       var urls = Array.from(list.querySelectorAll("input:checked")).map(function (box) {
         return box.dataset.url || lessonUrl(box.dataset.title);
@@ -320,12 +374,14 @@
         msg.textContent = "Hãy tick ít nhất một phần.";
         return;
       }
-      var paths = {};
-      urls.forEach(function (url) { paths[url.split("#")[0]] = true; });
-      if (Object.keys(paths).length < urls.length) {
-        msg.textContent = "Link đã tick đang trùng nhau, nên cửa sổ sẽ mở cùng một bài.";
+      var ids = urls.map(contentKey).filter(Boolean);
+      var unique = {};
+      ids.forEach(function (id) { unique[id] = true; });
+      if (ids.length < urls.length || Object.keys(unique).length < urls.length) {
+        msg.textContent = "Chưa có mã riêng cho từng bài. Hãy tải lại trang lớp, bấm Ghép bài, rồi tick lại.";
+        return;
       }
-      msg.textContent = "Đang xếp ô...";
+      msg.textContent = "Đang mở từng cửa...";
       tile(urls).then(function (result) {
         msg.textContent = result.blocked
           ? "Đã mở " + result.opened + ", bị chặn " + result.blocked + "."
@@ -342,7 +398,7 @@
     ["pointerdown", "click"].forEach(function (type) {
       panel.addEventListener(type, function (event) { event.stopPropagation(); });
     });
-    panel.append(title, go, close, list, msg);
+    panel.append(title, go, msg, close, list);
     document.documentElement.appendChild(panel);
     loadOutline().then(function (result) {
       var parts = result.items || [];
